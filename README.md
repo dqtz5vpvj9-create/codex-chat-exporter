@@ -1,6 +1,74 @@
 # Codex Chat Exporter
 
-Export local Codex session JSONL files to readable Markdown.
+Turn local Codex session JSONL files into readable Markdown.
+
+`codex-chat-exporter` is a tiny, dependency-free CLI for extracting the human
+conversation from Codex logs. It keeps the useful user/assistant trail, removes
+Codex internal context blocks, and offers compact presets for long sessions that
+would otherwise become unreadable walls of tool output.
+
+## Why It Exists
+
+Codex session files are excellent for recovery and audit, but raw JSONL is hard
+to read. Large sessions often contain tool calls, internal context tags,
+developer messages, repeated environment metadata, and huge command outputs.
+
+This tool focuses on the part people usually want to read or share:
+
+- the actual user and assistant conversation
+- a clean Markdown document
+- fast exports from either a session id or a direct JSONL path
+- presets that range from full transcript to compact decision log
+
+## Highlights
+
+- **Fast on large logs**: exports a 112MB / 54,314-row session in about 1.2-1.4s.
+- **Three useful presets**: `full`, `readable`, and `decisions`.
+- **No runtime dependencies**: Python standard library only.
+- **Session id lookup**: pass a Codex session id and it finds the matching JSONL under `~/.codex/sessions`.
+- **Direct file mode**: pass any `rollout-*.jsonl` path.
+- **Markdown-first output**: easy to read, diff, archive, email, or feed into another model.
+
+## Quick Start
+
+Run directly from GitHub with `uvx`:
+
+```bash
+uvx --from "codex-chat-exporter @ git+https://github.com/dqtz5vpvj9-create/codex-chat-exporter.git" \
+  codex-chat-export 019e36b3-4357-7381-be9a-2b6b52cd9639 out.md --preset decisions
+```
+
+Export by direct JSONL path:
+
+```bash
+uvx --from "codex-chat-exporter @ git+https://github.com/dqtz5vpvj9-create/codex-chat-exporter.git" \
+  codex-chat-export ~/.codex/sessions/2026/05/17/rollout-xxx.jsonl out.md --preset readable
+```
+
+Run from a local checkout:
+
+```bash
+git clone https://github.com/dqtz5vpvj9-create/codex-chat-exporter.git
+cd codex-chat-exporter
+python -m pip install .
+codex-chat-export 019e36b3-4357-7381-be9a-2b6b52cd9639 out.md --preset full
+```
+
+## Presets
+
+| Preset | Best for | What it keeps |
+| --- | --- | --- |
+| `full` | high-fidelity chat archive | complete visible user/assistant chat, with internal Codex context tags removed |
+| `readable` | day-to-day reading | full chat with obvious noise and short tactical messages removed |
+| `decisions` | quick review, handoff, summaries | compact conclusion/evidence-focused extract |
+
+Legacy names still work:
+
+| Legacy | Current |
+| --- | --- |
+| `raw` | `full` |
+| `clean` | `readable` |
+| `substantive` | `decisions` |
 
 ## Benchmark
 
@@ -25,28 +93,69 @@ Use either a session JSONL path or a Codex session id:
 codex-chat-export 019e36b3-4357-7381-be9a-2b6b52cd9639 --probe
 codex-chat-export 019e36b3-4357-7381-be9a-2b6b52cd9639 out.md --preset full
 codex-chat-export /home/chris/.codex/sessions/2026/05/17/rollout-xxx.jsonl out.md --preset readable
+codex-chat-export /home/chris/.codex/sessions/2026/05/17/rollout-xxx.jsonl out.md --preset decisions
 ```
 
-Run through `uvx` from GitHub:
+Print to stdout:
 
 ```bash
-uvx --from "codex-chat-exporter @ git+https://github.com/dqtz5vpvj9-create/codex-chat-exporter.git" codex-chat-export 019e36b3-4357-7381-be9a-2b6b52cd9639 out.md --preset decisions
+codex-chat-export 019e36b3-4357-7381-be9a-2b6b52cd9639 --preset decisions --stdout
 ```
 
-Run through `uvx` from a local checkout:
+Export only records after a timestamp:
 
 ```bash
-uvx --from /home/chris/codex-chat-exporter codex-chat-export 019e36b3-4357-7381-be9a-2b6b52cd9639 out.md --preset decisions
+codex-chat-export 019e36b3-4357-7381-be9a-2b6b52cd9639 out.md \
+  --preset readable \
+  --since 2026-05-17T10:52:04
 ```
 
-## Presets
+Use a custom Codex home:
 
-- `full`: complete visible user/assistant chat, minus internal Codex context tag blocks.
-- `readable`: drops obvious environment noise and short tactical messages.
-- `decisions`: compact extract focused on verdicts, conclusions, and evidence-heavy paragraphs.
+```bash
+codex-chat-export 019e36b3-4357-7381-be9a-2b6b52cd9639 out.md \
+  --codex-home /path/to/.codex
+```
 
-Legacy names still work:
+List presets:
 
-- `raw` -> `full`
-- `clean` -> `readable`
-- `substantive` -> `decisions`
+```bash
+codex-chat-export --list-presets
+```
+
+## Output Shape
+
+The Markdown starts with session metadata, then emits merged chat sections:
+
+```markdown
+# Codex Chat History (decisions)
+Preset: decisions (legacy substantive): compact conclusion/evidence extract
+Source: /home/chris/.codex/sessions/...
+Session: 019e36b3-4357-7381-be9a-2b6b52cd9639
+Thread: CompressSwapBenchSurvey
+
+## User [2026-04-29 07:18:31]
+...
+
+## Assistant [2026-04-29 07:18:31] [final_answer]
+...
+```
+
+## Development
+
+```bash
+git clone https://github.com/dqtz5vpvj9-create/codex-chat-exporter.git
+cd codex-chat-exporter
+python -m pip install -e .
+codex-chat-export --help
+```
+
+Run the module directly during development:
+
+```bash
+PYTHONPATH=src python -m codex_chat_exporter.cli --help
+```
+
+## License
+
+MIT
