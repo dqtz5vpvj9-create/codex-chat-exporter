@@ -2,6 +2,21 @@
 
 Export local Codex session JSONL files to readable Markdown.
 
+## Benchmark
+
+Same 112MB Codex session JSONL, 54,314 rows, benchmarked on Linux CLI.
+
+| 工具/模式 | 耗时 | 体积 | 行数 |
+| --- | ---: | ---: | ---: |
+| codex-chat-exporter (full) | 1.239s | 941.0KB | 15,546 |
+| codex-chat-exporter (readable) | 1.320s | 916.3KB | 15,144 |
+| codex-chat-exporter (decisions) | 1.405s | 171.5KB | 3,061 |
+| MeXenon/codex-session-export (Chat Clean) | 1.362s | 989.4KB | 22,776 |
+| tobitege/codlogs (--md default) | 5.763s | 1.1MB | 23,239 |
+| timvw/codex-transcripts (html archive) | 8.064s | 778.3KB index / 73.5MB archive | 15,759 index / 42 pages |
+| brucehart/codex-transcripts (md+html archive) | 31.308s | 55.2MB transcript / 72.5MB archive | 771,286 |
+| nicosuave/memex session dump (pre-indexed) | 2.594s | 223.8MB | 74,541 |
+
 ## Usage
 
 Use either a session JSONL path or a Codex session id:
