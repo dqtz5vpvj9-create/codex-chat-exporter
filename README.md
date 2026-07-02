@@ -15,7 +15,7 @@ codex-chat-export /home/chris/.codex/sessions/2026/05/17/rollout-xxx.jsonl out.m
 Run through `uvx` from GitHub:
 
 ```bash
-uvx --from git+https://github.com/dqtz5vpvj9-create/codex-chat-exporter.git codex-chat-export 019e36b3-4357-7381-be9a-2b6b52cd9639 out.md --preset decisions
+uvx --from "codex-chat-exporter @ git+https://github.com/dqtz5vpvj9-create/codex-chat-exporter.git" codex-chat-export 019e36b3-4357-7381-be9a-2b6b52cd9639 out.md --preset decisions
 ```
 
 Run through `uvx` from a local checkout:
