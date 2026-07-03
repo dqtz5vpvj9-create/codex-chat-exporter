@@ -4,13 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-chat-exporter"
-version = "0.1.4"
+version = "0.1.5"
 description = "Export local Codex session JSONL files to readable Markdown."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Local" }]
-dependencies = []
+dependencies = [
+    "tzdata; platform_system == 'Windows'",
+]
 
 [project.scripts]
 codex-chat-export = "codex_chat_exporter.cli:main"

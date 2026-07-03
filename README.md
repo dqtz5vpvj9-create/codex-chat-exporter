@@ -24,7 +24,7 @@ This tool focuses on the part people usually want to read or share:
 
 - **Fast on large logs**: exports a 112MB / 54,314-row session in about 1.2-1.4s.
 - **Five useful presets**: `full`, `readable`, `decisions`, `trace`, and `raw-jsonl`.
-- **No runtime dependencies**: Python standard library only.
+- **Minimal dependencies**: standard library on Unix-like systems; installs `tzdata` on Windows so IANA timezones like `Asia/Shanghai` work under `zoneinfo`.
 - **Session id lookup**: pass a Codex session id and it finds the matching JSONL under `~/.codex/sessions`.
 - **Direct file mode**: pass any `rollout-*.jsonl` path.
 - **Configurable timestamp display**: Markdown and `--probe` default to `+08:00`; override with `--tz`.
@@ -106,6 +106,9 @@ Markdown exports and `--probe` display timestamps in `+08:00` by default. Use
 `--tz UTC`, `--tz +08:00`, `--tz Asia/Shanghai`, or
 `--tz America/Los_Angeles` to choose another display timezone. `raw-jsonl`
 keeps the original JSONL records unchanged.
+
+All session reads and Markdown writes use UTF-8, so Chinese transcript content
+does not depend on the Windows console locale.
 
 Print to stdout:
 

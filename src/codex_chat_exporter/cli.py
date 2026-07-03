@@ -36,6 +36,7 @@ PRESET_LABELS = {
 
 TRACE_TEXT_LIMIT = 20000
 DEFAULT_TIMEZONE = "+08:00"
+TEXT_ENCODING = "utf-8"
 
 ENV_KEYWORDS = [
     "cvd", "cuttlefish", "cgdroid", "arm-2", "r743", "adb reboot", "adb sync",
@@ -287,7 +288,7 @@ def normalize_preset(mode: str | None, preset: str | None) -> str:
 
 def read_session_meta(path: Path) -> tuple[str | None, str | None]:
     try:
-        with path.open() as f:
+        with path.open(encoding=TEXT_ENCODING) as f:
             for line in f:
                 obj = json.loads(line)
                 if obj.get("type") != "session_meta":
@@ -307,7 +308,7 @@ def read_thread_name_from_index(codex_home: Path, session_id: str | None) -> str
         return None
     latest_name = None
     try:
-        with index.open() as f:
+        with index.open(encoding=TEXT_ENCODING) as f:
             for line in f:
                 try:
                     obj = json.loads(line)
@@ -399,7 +400,7 @@ def iter_visible_messages(
     boundary: datetime | None = None,
     display_tz: tzinfo = parse_timezone(None),
 ) -> Iterator[ChatRecord]:
-    with path.open() as f:
+    with path.open(encoding=TEXT_ENCODING) as f:
         for line in f:
             try:
                 obj = json.loads(line)
@@ -429,7 +430,7 @@ def iter_visible_messages(
 
 
 def iter_jsonl_objects(path: Path, boundary: datetime | None = None) -> Iterator[dict]:
-    with path.open() as f:
+    with path.open(encoding=TEXT_ENCODING) as f:
         for line in f:
             try:
                 obj = json.loads(line)
@@ -771,10 +772,10 @@ def render_trace_markdown(
 
 def render_raw_jsonl(path: Path, boundary: datetime | None = None) -> str:
     if boundary is None:
-        return path.read_text()
+        return path.read_text(encoding=TEXT_ENCODING)
 
     lines = []
-    with path.open() as f:
+    with path.open(encoding=TEXT_ENCODING) as f:
         for line in f:
             try:
                 obj = json.loads(line)
@@ -1016,7 +1017,19 @@ decisions, which is the old substantive mode under a clearer name.
     return parser
 
 
+def configure_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding=TEXT_ENCODING)
+        except Exception:
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    configure_stdio()
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
@@ -1064,7 +1077,8 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(output_text)
     else:
         output = Path(args.output).expanduser() if args.output else default_output_path(session, preset)
-        output.write_text(output_text)
+        with output.open("w", encoding=TEXT_ENCODING, newline="\n") as f:
+            f.write(output_text)
         print(f"wrote {output}")
     print(f"preset: {preset}", file=sys.stderr if args.stdout else sys.stdout)
     print(f"records: {record_count}; merged sections: {section_count}", file=sys.stderr if args.stdout else sys.stdout)
