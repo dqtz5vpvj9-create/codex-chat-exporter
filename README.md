@@ -27,6 +27,7 @@ This tool focuses on the part people usually want to read or share:
 - **No runtime dependencies**: Python standard library only.
 - **Session id lookup**: pass a Codex session id and it finds the matching JSONL under `~/.codex/sessions`.
 - **Direct file mode**: pass any `rollout-*.jsonl` path.
+- **Configurable timestamp display**: Markdown and `--probe` default to `+08:00`; override with `--tz`.
 - **Markdown-first output**: easy to read, diff, archive, email, or feed into another model.
 
 ## Quick Start
@@ -94,11 +95,17 @@ Use either a session JSONL path or a Codex session id:
 ```bash
 codex-chat-export SESSION_ID --probe
 codex-chat-export SESSION_ID out.md --preset full
+codex-chat-export SESSION_ID out.md --preset full --tz America/Los_Angeles
 codex-chat-export ~/.codex/sessions/2026/05/17/rollout-xxx.jsonl out.md --preset readable
 codex-chat-export ~/.codex/sessions/2026/05/17/rollout-xxx.jsonl out.md --preset decisions
 codex-chat-export SESSION_ID trace.md --preset trace
 codex-chat-export SESSION_ID raw.jsonl --preset raw-jsonl
 ```
+
+Markdown exports and `--probe` display timestamps in `+08:00` by default. Use
+`--tz UTC`, `--tz +08:00`, `--tz Asia/Shanghai`, or
+`--tz America/Los_Angeles` to choose another display timezone. `raw-jsonl`
+keeps the original JSONL records unchanged.
 
 Print to stdout:
 
@@ -113,6 +120,10 @@ codex-chat-export SESSION_ID out.md \
   --preset readable \
   --since 2026-05-17T10:52:04
 ```
+
+Naive `--since` timestamps are still interpreted as UTC for compatibility.
+Include an offset to filter by another timezone, for example
+`--since 2026-05-17T18:52:04+08:00`.
 
 Use a custom Codex home:
 

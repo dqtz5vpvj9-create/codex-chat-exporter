@@ -8,9 +8,10 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Iterable, Iterator
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 PRESET_ALIASES = {
@@ -34,6 +35,7 @@ PRESET_LABELS = {
 }
 
 TRACE_TEXT_LIMIT = 20000
+DEFAULT_TIMEZONE = "+08:00"
 
 ENV_KEYWORDS = [
     "cvd", "cuttlefish", "cgdroid", "arm-2", "r743", "adb reboot", "adb sync",
@@ -157,6 +159,66 @@ def parse_ts(ts: str | None) -> datetime | None:
         return None
 
 
+def parse_timezone(value: str | None) -> tzinfo:
+    value = (value or DEFAULT_TIMEZONE).strip()
+    aliases = {
+        "z": "UTC",
+        "utc": "UTC",
+        "gmt": "UTC",
+        "东八区": "+08:00",
+        "北京时间": "+08:00",
+        "beijing": "+08:00",
+        "china": "+08:00",
+        "east8": "+08:00",
+        "east-8": "+08:00",
+    }
+    normalized = aliases.get(value.lower(), value)
+    if normalized == "UTC":
+        return timezone.utc
+
+    offset_match = re.fullmatch(
+        r"(?:UTC|GMT)?\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?",
+        normalized,
+        re.IGNORECASE,
+    )
+    if offset_match:
+        sign_s, hours_s, minutes_s = offset_match.groups()
+        hours = int(hours_s)
+        minutes = int(minutes_s or "0")
+        if hours > 23 or minutes > 59:
+            raise ValueError(f"invalid timezone offset: {value!r}")
+        delta = timedelta(hours=hours, minutes=minutes)
+        if sign_s == "-":
+            delta = -delta
+        label = f"UTC{sign_s}{hours:02d}:{minutes:02d}"
+        return timezone(delta, label)
+
+    try:
+        return ZoneInfo(normalized)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(
+            f"unknown timezone {value!r}; use +08:00, UTC, America/Los_Angeles, Asia/Shanghai, etc."
+        ) from exc
+
+
+def timezone_label(display_tz: tzinfo) -> str:
+    key = getattr(display_tz, "key", None)
+    if key:
+        return key
+    name = display_tz.tzname(None)
+    if name:
+        return name
+    offset = display_tz.utcoffset(None)
+    if offset is None:
+        return str(display_tz)
+    total_seconds = int(offset.total_seconds())
+    sign = "+" if total_seconds >= 0 else "-"
+    total_seconds = abs(total_seconds)
+    hours, rem = divmod(total_seconds, 3600)
+    minutes = rem // 60
+    return f"UTC{sign}{hours:02d}:{minutes:02d}"
+
+
 def parse_boundary(ts: str | None) -> datetime | None:
     if not ts:
         return None
@@ -166,11 +228,11 @@ def parse_boundary(ts: str | None) -> datetime | None:
     return dt
 
 
-def fmt_ts(ts: str | None) -> str:
+def fmt_ts(ts: str | None, display_tz: tzinfo) -> str:
     dt = parse_ts(ts)
     if not dt:
         return ts or ""
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return dt.astimezone(display_tz).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def truncate(text: str, limit: int = 8000) -> str:
@@ -332,7 +394,11 @@ def extract_text(payload: dict) -> str:
     return strip_internal_context_blocks("\n\n".join(texts))
 
 
-def iter_visible_messages(path: Path, boundary: datetime | None = None) -> Iterator[ChatRecord]:
+def iter_visible_messages(
+    path: Path,
+    boundary: datetime | None = None,
+    display_tz: tzinfo = parse_timezone(None),
+) -> Iterator[ChatRecord]:
     with path.open() as f:
         for line in f:
             try:
@@ -356,7 +422,7 @@ def iter_visible_messages(path: Path, boundary: datetime | None = None) -> Itera
             if text.strip():
                 yield ChatRecord(
                     role=role,
-                    timestamp=fmt_ts(obj.get("timestamp")),
+                    timestamp=fmt_ts(obj.get("timestamp"), display_tz),
                     phase=payload.get("phase") or "",
                     body=text,
                 )
@@ -479,11 +545,15 @@ def render_message_payload(payload: dict) -> str:
     return "_Internal context omitted._"
 
 
-def render_trace_record(obj: dict, call_names: dict[str, str]) -> TraceRecord | None:
+def render_trace_record(
+    obj: dict,
+    call_names: dict[str, str],
+    display_tz: tzinfo,
+) -> TraceRecord | None:
     payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
     top_type = obj.get("type") or "unknown"
     payload_type = payload.get("type")
-    ts = fmt_ts(obj.get("timestamp"))
+    ts = fmt_ts(obj.get("timestamp"), display_tz)
 
     if top_type == "response_item" and payload_type == "message":
         role = payload.get("role") or "message"
@@ -656,11 +726,15 @@ def render_trace_record(obj: dict, call_names: dict[str, str]) -> TraceRecord | 
     return TraceRecord(ts, event_kind(obj), json_fence("Record:", obj, 4000))
 
 
-def build_trace_records(path: Path, boundary: datetime | None = None) -> list[TraceRecord]:
+def build_trace_records(
+    path: Path,
+    boundary: datetime | None = None,
+    display_tz: tzinfo = parse_timezone(None),
+) -> list[TraceRecord]:
     records = []
     call_names: dict[str, str] = {}
     for obj in iter_jsonl_objects(path, boundary):
-        record = render_trace_record(obj, call_names)
+        record = render_trace_record(obj, call_names, display_tz)
         if record is not None:
             records.append(record)
     return records
@@ -669,19 +743,21 @@ def build_trace_records(path: Path, boundary: datetime | None = None) -> list[Tr
 def render_trace_markdown(
     session: SessionInfo,
     records: Iterable[TraceRecord],
+    display_tz: tzinfo,
     since: str | None = None,
 ) -> str:
     lines = [
         "# Codex Session Trace",
         f"Preset: {PRESET_LABELS['trace']}",
         f"Source: {session.path}",
+        f"Timezone: {timezone_label(display_tz)}",
     ]
     if session.session_id:
         lines.append(f"Session: {session.session_id}")
     if session.thread_name:
         lines.append(f"Thread: {session.thread_name}")
     if since:
-        lines.append(f"Window: after {since} UTC")
+        lines.append(f"Window: after {since}")
     lines.append("")
 
     for index, item in enumerate(records, start=1):
@@ -768,9 +844,14 @@ def keep_assistant_body(text: str, preset: str) -> str:
     return "\n\n".join(kept) if kept else ""
 
 
-def build_records(path: Path, preset: str, boundary: datetime | None = None) -> list[ChatRecord]:
+def build_records(
+    path: Path,
+    preset: str,
+    boundary: datetime | None = None,
+    display_tz: tzinfo = parse_timezone(None),
+) -> list[ChatRecord]:
     records = []
-    for record in iter_visible_messages(path, boundary):
+    for record in iter_visible_messages(path, boundary, display_tz):
         if record.role == "user":
             body = keep_user_body(record.body, preset)
         else:
@@ -803,19 +884,21 @@ def render_markdown(
     session: SessionInfo,
     preset: str,
     merged: Iterable[MergedRecord],
+    display_tz: tzinfo,
     since: str | None = None,
 ) -> str:
     lines = [
         f"# Codex Chat History ({preset})",
         f"Preset: {PRESET_LABELS[preset]}",
         f"Source: {session.path}",
+        f"Timezone: {timezone_label(display_tz)}",
     ]
     if session.session_id:
         lines.append(f"Session: {session.session_id}")
     if session.thread_name:
         lines.append(f"Thread: {session.thread_name}")
     if since:
-        lines.append(f"Window: after {since} UTC")
+        lines.append(f"Window: after {since}")
     lines.append("")
 
     for item in merged:
@@ -828,9 +911,14 @@ def render_markdown(
     return "\n".join(lines)
 
 
-def probe(session: SessionInfo, preset: str, boundary: datetime | None = None) -> None:
+def probe(
+    session: SessionInfo,
+    preset: str,
+    boundary: datetime | None = None,
+    display_tz: tzinfo = parse_timezone(None),
+) -> None:
     if preset == "trace":
-        trace_records = build_trace_records(session.path, boundary)
+        trace_records = build_trace_records(session.path, boundary, display_tz)
         records = [record.timestamp for record in trace_records if record.timestamp]
         first = records[0] if records else None
         last = records[-1] if records else None
@@ -838,7 +926,7 @@ def probe(session: SessionInfo, preset: str, boundary: datetime | None = None) -
     elif preset == "raw-jsonl":
         objects = list(iter_jsonl_objects(session.path, boundary))
         records = [
-            fmt_ts(obj.get("timestamp"))
+            fmt_ts(obj.get("timestamp"), display_tz)
             for obj in objects
             if obj.get("timestamp")
         ]
@@ -846,7 +934,7 @@ def probe(session: SessionInfo, preset: str, boundary: datetime | None = None) -
         last = records[-1] if records else None
         count = len(objects)
     else:
-        visible_records = list(iter_visible_messages(session.path, boundary))
+        visible_records = list(iter_visible_messages(session.path, boundary, display_tz))
         first = visible_records[0].timestamp if visible_records else None
         last = visible_records[-1].timestamp if visible_records else None
         count = len(visible_records)
@@ -856,6 +944,7 @@ def probe(session: SessionInfo, preset: str, boundary: datetime | None = None) -
     if session.thread_name:
         print(f"thread:  {session.thread_name}")
     print(f"preset:  {preset}")
+    print(f"timezone: {timezone_label(display_tz)}")
     print(f"records: {count}")
     print(f"first:   {first}")
     print(f"last:    {last}")
@@ -902,8 +991,18 @@ decisions, which is the old substantive mode under a clearer name.
         "--since",
         default=None,
         help=(
-            "UTC ISO timestamp; only keep records strictly after this. "
-            "Example: 2026-05-17T10:52:04"
+            "ISO timestamp; only keep records strictly after this. "
+            "Naive timestamps are treated as UTC for backward compatibility. "
+            "Example: 2026-05-17T10:52:04 or 2026-05-17T18:52:04+08:00"
+        ),
+    )
+    parser.add_argument(
+        "--timezone",
+        "--tz",
+        default=DEFAULT_TIMEZONE,
+        help=(
+            "Display timezone for exported Markdown and --probe. "
+            "Default: +08:00. Examples: +08:00, UTC, America/Los_Angeles, Asia/Shanghai"
         ),
     )
     parser.add_argument(
@@ -934,6 +1033,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         preset = normalize_preset(args.mode, args.preset)
         boundary = parse_boundary(args.since)
+        display_tz = parse_timezone(args.timezone)
         codex_home = codex_home_from_arg(args.codex_home)
         session = resolve_session(args.session, codex_home)
     except Exception as exc:
@@ -941,7 +1041,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.probe:
-        probe(session, preset, boundary)
+        probe(session, preset, boundary, display_tz)
         return 0
 
     if preset == "raw-jsonl":
@@ -949,14 +1049,14 @@ def main(argv: list[str] | None = None) -> int:
         record_count = jsonl_record_count(session.path, boundary)
         section_count = record_count
     elif preset == "trace":
-        trace_records = build_trace_records(session.path, boundary)
-        output_text = render_trace_markdown(session, trace_records, args.since)
+        trace_records = build_trace_records(session.path, boundary, display_tz)
+        output_text = render_trace_markdown(session, trace_records, display_tz, args.since)
         record_count = len(trace_records)
         section_count = len(trace_records)
     else:
-        records = build_records(session.path, preset, boundary)
+        records = build_records(session.path, preset, boundary, display_tz)
         merged = merge_records(records)
-        output_text = render_markdown(session, preset, merged, args.since)
+        output_text = render_markdown(session, preset, merged, display_tz, args.since)
         record_count = len(records)
         section_count = len(merged)
 
