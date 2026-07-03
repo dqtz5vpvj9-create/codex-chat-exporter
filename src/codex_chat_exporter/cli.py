@@ -8,7 +8,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone, tzinfo
+from datetime import datetime, time as datetime_time, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Iterable, Iterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -37,6 +37,8 @@ PRESET_LABELS = {
 TRACE_TEXT_LIMIT = 20000
 DEFAULT_TIMEZONE = "+08:00"
 TEXT_ENCODING = "utf-8"
+
+TIME_RANGE_FLAGS = {"--since", "--until"}
 
 ENV_KEYWORDS = [
     "cvd", "cuttlefish", "cgdroid", "arm-2", "r743", "adb reboot", "adb sync",
@@ -145,6 +147,12 @@ class TraceRecord:
     body: str
 
 
+@dataclass(frozen=True)
+class TimeRange:
+    since: datetime | None = None
+    until: datetime | None = None
+
+
 def codex_home_from_arg(value: str | None) -> Path:
     if value:
         return Path(value).expanduser()
@@ -155,9 +163,12 @@ def parse_ts(ts: str | None) -> datetime | None:
     if not ts:
         return None
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except Exception:
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def parse_timezone(value: str | None) -> tzinfo:
@@ -220,20 +231,189 @@ def timezone_label(display_tz: tzinfo) -> str:
     return f"UTC{sign}{hours:02d}:{minutes:02d}"
 
 
-def parse_boundary(ts: str | None) -> datetime | None:
-    if not ts:
+def parse_duration(value: str) -> timedelta:
+    unit_seconds = {
+        "us": 0.000001,
+        "usec": 0.000001,
+        "usecs": 0.000001,
+        "microsecond": 0.000001,
+        "microseconds": 0.000001,
+        "ms": 0.001,
+        "msec": 0.001,
+        "msecs": 0.001,
+        "millisecond": 0.001,
+        "milliseconds": 0.001,
+        "s": 1,
+        "sec": 1,
+        "secs": 1,
+        "second": 1,
+        "seconds": 1,
+        "m": 60,
+        "min": 60,
+        "mins": 60,
+        "minute": 60,
+        "minutes": 60,
+        "h": 3600,
+        "hr": 3600,
+        "hrs": 3600,
+        "hour": 3600,
+        "hours": 3600,
+        "d": 86400,
+        "day": 86400,
+        "days": 86400,
+        "w": 604800,
+        "week": 604800,
+        "weeks": 604800,
+        "month": 2592000,
+        "months": 2592000,
+        "y": 31536000,
+        "year": 31536000,
+        "years": 31536000,
+    }
+    text = value.strip().lower().replace("μ", "u").replace("µ", "u")
+    if not text:
+        raise ValueError("empty duration")
+
+    total_seconds = 0.0
+    position = 0
+    found = False
+    pattern = re.compile(r"(\d+(?:\.\d+)?)\s*([a-z]+)?")
+    for match in pattern.finditer(text):
+        if text[position:match.start()].strip():
+            raise ValueError(f"invalid duration: {value!r}")
+        number_s, unit = match.groups()
+        unit = unit or "s"
+        if unit not in unit_seconds:
+            raise ValueError(f"unknown duration unit {unit!r} in {value!r}")
+        total_seconds += float(number_s) * unit_seconds[unit]
+        position = match.end()
+        found = True
+    if not found or text[position:].strip():
+        raise ValueError(f"invalid duration: {value!r}")
+    return timedelta(seconds=total_seconds)
+
+
+def parse_time_of_day(value: str) -> datetime_time:
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?", value.strip())
+    if not match:
+        raise ValueError(f"invalid time of day: {value!r}")
+    hour_s, minute_s, second_s = match.groups()
+    hour = int(hour_s)
+    minute = int(minute_s)
+    second = int(second_s or "0")
+    if hour > 23 or minute > 59 or second > 59:
+        raise ValueError(f"invalid time of day: {value!r}")
+    return datetime_time(hour, minute, second)
+
+
+def parse_time_spec(value: str | None, display_tz: tzinfo, now: datetime) -> datetime | None:
+    if not value:
         return None
-    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+    text = value.strip()
+    if not text:
+        return None
+
+    lower = text.lower()
+    local_now = now.astimezone(display_tz)
+
+    if lower in {"now", "current"}:
+        return now
+
+    relative = lower
+    direction = None
+    if relative.endswith(" ago"):
+        relative = relative[:-4].strip()
+        direction = -1
+    elif relative.startswith("-"):
+        relative = relative[1:].strip()
+        direction = -1
+    elif relative.startswith("+"):
+        relative = relative[1:].strip()
+        direction = 1
+    if direction is not None:
+        duration = parse_duration(relative)
+        return now + (duration if direction > 0 else -duration)
+
+    day_match = re.fullmatch(r"(today|yesterday|tomorrow)(?:\s+(.+))?", lower)
+    if day_match:
+        day_word, time_part = day_match.groups()
+        offset_days = {"yesterday": -1, "today": 0, "tomorrow": 1}[day_word]
+        local_day = (local_now + timedelta(days=offset_days)).date()
+        local_time = parse_time_of_day(time_part) if time_part else datetime_time()
+        return datetime.combine(local_day, local_time, display_tz)
+
+    if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?", text):
+        local_time = parse_time_of_day(text)
+        return datetime.combine(local_now.date(), local_time, display_tz)
+
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            f"unsupported time spec {value!r}; use ISO, 'YYYY-MM-DD HH:MM:SS', "
+            "'-1h', '1 hour ago', 'today', 'yesterday', or 'now'"
+        ) from exc
+    if dt.tzinfo is not None:
+        return dt
+
+    # Backward compatibility: older documented --since examples used ISO with
+    # "T" and no timezone, and were interpreted as UTC.
+    if "T" in text:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.replace(tzinfo=display_tz)
+
+
+def parse_time_range(
+    since: str | None,
+    until: str | None,
+    display_tz: tzinfo,
+    now: datetime | None = None,
+) -> TimeRange:
+    reference = now or datetime.now(timezone.utc)
+    start = parse_time_spec(since, display_tz, reference)
+    end = parse_time_spec(until, display_tz, reference)
+    if start and end and start > end:
+        raise ValueError(f"--since {since!r} is later than --until {until!r}")
+    return TimeRange(start, end)
+
+
+def in_time_range(ts: datetime | None, time_range: TimeRange) -> bool:
+    if ts is None:
+        return True
+    if time_range.since and ts <= time_range.since:
+        return False
+    if time_range.until and ts > time_range.until:
+        return False
+    return True
 
 
 def fmt_ts(ts: str | None, display_tz: tzinfo) -> str:
     dt = parse_ts(ts)
     if not dt:
         return ts or ""
+    return fmt_dt(dt, display_tz)
+
+
+def fmt_dt(dt: datetime, display_tz: tzinfo) -> str:
     return dt.astimezone(display_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def window_lines(
+    time_range: TimeRange,
+    display_tz: tzinfo,
+    since_text: str | None = None,
+    until_text: str | None = None,
+) -> list[str]:
+    lines = []
+    if since_text and time_range.since:
+        lines.append(f"Window since: {since_text} ({fmt_dt(time_range.since, display_tz)})")
+    elif time_range.since:
+        lines.append(f"Window since: {fmt_dt(time_range.since, display_tz)}")
+    if until_text and time_range.until:
+        lines.append(f"Window until: {until_text} ({fmt_dt(time_range.until, display_tz)})")
+    elif time_range.until:
+        lines.append(f"Window until: {fmt_dt(time_range.until, display_tz)}")
+    return lines
 
 
 def truncate(text: str, limit: int = 8000) -> str:
@@ -397,7 +577,7 @@ def extract_text(payload: dict) -> str:
 
 def iter_visible_messages(
     path: Path,
-    boundary: datetime | None = None,
+    time_range: TimeRange = TimeRange(),
     display_tz: tzinfo = parse_timezone(None),
 ) -> Iterator[ChatRecord]:
     with path.open(encoding=TEXT_ENCODING) as f:
@@ -417,7 +597,7 @@ def iter_visible_messages(
             ts_dt = parse_ts(obj.get("timestamp"))
             if ts_dt is None:
                 continue
-            if boundary and ts_dt <= boundary:
+            if not in_time_range(ts_dt, time_range):
                 continue
             text = extract_text(payload)
             if text.strip():
@@ -429,22 +609,21 @@ def iter_visible_messages(
                 )
 
 
-def iter_jsonl_objects(path: Path, boundary: datetime | None = None) -> Iterator[dict]:
+def iter_jsonl_objects(path: Path, time_range: TimeRange = TimeRange()) -> Iterator[dict]:
     with path.open(encoding=TEXT_ENCODING) as f:
         for line in f:
             try:
                 obj = json.loads(line)
             except Exception:
                 continue
-            if boundary:
-                ts_dt = parse_ts(obj.get("timestamp"))
-                if ts_dt is not None and ts_dt <= boundary:
-                    continue
+            ts_dt = parse_ts(obj.get("timestamp"))
+            if not in_time_range(ts_dt, time_range):
+                continue
             yield obj
 
 
-def jsonl_record_count(path: Path, boundary: datetime | None = None) -> int:
-    return sum(1 for _ in iter_jsonl_objects(path, boundary))
+def jsonl_record_count(path: Path, time_range: TimeRange = TimeRange()) -> int:
+    return sum(1 for _ in iter_jsonl_objects(path, time_range))
 
 
 def event_kind(obj: dict) -> str:
@@ -729,12 +908,12 @@ def render_trace_record(
 
 def build_trace_records(
     path: Path,
-    boundary: datetime | None = None,
+    time_range: TimeRange = TimeRange(),
     display_tz: tzinfo = parse_timezone(None),
 ) -> list[TraceRecord]:
     records = []
     call_names: dict[str, str] = {}
-    for obj in iter_jsonl_objects(path, boundary):
+    for obj in iter_jsonl_objects(path, time_range):
         record = render_trace_record(obj, call_names, display_tz)
         if record is not None:
             records.append(record)
@@ -745,7 +924,9 @@ def render_trace_markdown(
     session: SessionInfo,
     records: Iterable[TraceRecord],
     display_tz: tzinfo,
+    time_range: TimeRange = TimeRange(),
     since: str | None = None,
+    until: str | None = None,
 ) -> str:
     lines = [
         "# Codex Session Trace",
@@ -757,8 +938,7 @@ def render_trace_markdown(
         lines.append(f"Session: {session.session_id}")
     if session.thread_name:
         lines.append(f"Thread: {session.thread_name}")
-    if since:
-        lines.append(f"Window: after {since}")
+    lines.extend(window_lines(time_range, display_tz, since, until))
     lines.append("")
 
     for index, item in enumerate(records, start=1):
@@ -770,8 +950,8 @@ def render_trace_markdown(
     return "\n".join(lines)
 
 
-def render_raw_jsonl(path: Path, boundary: datetime | None = None) -> str:
-    if boundary is None:
+def render_raw_jsonl(path: Path, time_range: TimeRange = TimeRange()) -> str:
+    if time_range.since is None and time_range.until is None:
         return path.read_text(encoding=TEXT_ENCODING)
 
     lines = []
@@ -782,7 +962,7 @@ def render_raw_jsonl(path: Path, boundary: datetime | None = None) -> str:
             except Exception:
                 continue
             ts_dt = parse_ts(obj.get("timestamp"))
-            if ts_dt is not None and ts_dt <= boundary:
+            if not in_time_range(ts_dt, time_range):
                 continue
             lines.append(line if line.endswith("\n") else f"{line}\n")
     return "".join(lines)
@@ -848,11 +1028,11 @@ def keep_assistant_body(text: str, preset: str) -> str:
 def build_records(
     path: Path,
     preset: str,
-    boundary: datetime | None = None,
+    time_range: TimeRange = TimeRange(),
     display_tz: tzinfo = parse_timezone(None),
 ) -> list[ChatRecord]:
     records = []
-    for record in iter_visible_messages(path, boundary, display_tz):
+    for record in iter_visible_messages(path, time_range, display_tz):
         if record.role == "user":
             body = keep_user_body(record.body, preset)
         else:
@@ -886,7 +1066,9 @@ def render_markdown(
     preset: str,
     merged: Iterable[MergedRecord],
     display_tz: tzinfo,
+    time_range: TimeRange = TimeRange(),
     since: str | None = None,
+    until: str | None = None,
 ) -> str:
     lines = [
         f"# Codex Chat History ({preset})",
@@ -898,8 +1080,7 @@ def render_markdown(
         lines.append(f"Session: {session.session_id}")
     if session.thread_name:
         lines.append(f"Thread: {session.thread_name}")
-    if since:
-        lines.append(f"Window: after {since}")
+    lines.extend(window_lines(time_range, display_tz, since, until))
     lines.append("")
 
     for item in merged:
@@ -915,17 +1096,19 @@ def render_markdown(
 def probe(
     session: SessionInfo,
     preset: str,
-    boundary: datetime | None = None,
+    time_range: TimeRange = TimeRange(),
     display_tz: tzinfo = parse_timezone(None),
+    since: str | None = None,
+    until: str | None = None,
 ) -> None:
     if preset == "trace":
-        trace_records = build_trace_records(session.path, boundary, display_tz)
+        trace_records = build_trace_records(session.path, time_range, display_tz)
         records = [record.timestamp for record in trace_records if record.timestamp]
         first = records[0] if records else None
         last = records[-1] if records else None
         count = len(trace_records)
     elif preset == "raw-jsonl":
-        objects = list(iter_jsonl_objects(session.path, boundary))
+        objects = list(iter_jsonl_objects(session.path, time_range))
         records = [
             fmt_ts(obj.get("timestamp"), display_tz)
             for obj in objects
@@ -935,7 +1118,7 @@ def probe(
         last = records[-1] if records else None
         count = len(objects)
     else:
-        visible_records = list(iter_visible_messages(session.path, boundary, display_tz))
+        visible_records = list(iter_visible_messages(session.path, time_range, display_tz))
         first = visible_records[0].timestamp if visible_records else None
         last = visible_records[-1].timestamp if visible_records else None
         count = len(visible_records)
@@ -946,6 +1129,8 @@ def probe(
         print(f"thread:  {session.thread_name}")
     print(f"preset:  {preset}")
     print(f"timezone: {timezone_label(display_tz)}")
+    for line in window_lines(time_range, display_tz, since, until):
+        print(line)
     print(f"records: {count}")
     print(f"first:   {first}")
     print(f"last:    {last}")
@@ -992,9 +1177,17 @@ decisions, which is the old substantive mode under a clearer name.
         "--since",
         default=None,
         help=(
-            "ISO timestamp; only keep records strictly after this. "
-            "Naive timestamps are treated as UTC for backward compatibility. "
-            "Example: 2026-05-17T10:52:04 or 2026-05-17T18:52:04+08:00"
+            "Start of export range. Accepts ISO and systemd/journalctl-style "
+            "values such as -1h, '1 hour ago', now, today, yesterday, "
+            "or '2026-05-17 18:52:04'. Naive ISO with T remains UTC for compatibility."
+        ),
+    )
+    parser.add_argument(
+        "--until",
+        default=None,
+        help=(
+            "End of export range. Accepts the same systemd/journalctl-style "
+            "time values as --since. Records at exactly --until are kept."
         ),
     )
     parser.add_argument(
@@ -1028,10 +1221,26 @@ def configure_stdio() -> None:
             pass
 
 
+def normalize_time_range_args(argv: list[str]) -> list[str]:
+    normalized: list[str] = []
+    index = 0
+    while index < len(argv):
+        item = argv[index]
+        if item in TIME_RANGE_FLAGS and index + 1 < len(argv):
+            next_item = argv[index + 1]
+            if re.fullmatch(r"-\d.*", next_item):
+                normalized.append(f"{item}={next_item}")
+                index += 2
+                continue
+        normalized.append(item)
+        index += 1
+    return normalized
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_stdio()
     parser = build_arg_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(normalize_time_range_args(sys.argv[1:] if argv is None else argv))
 
     if args.list_presets:
         for name in ("full", "readable", "decisions", "trace", "raw-jsonl"):
@@ -1045,8 +1254,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         preset = normalize_preset(args.mode, args.preset)
-        boundary = parse_boundary(args.since)
         display_tz = parse_timezone(args.timezone)
+        time_range = parse_time_range(args.since, args.until, display_tz)
         codex_home = codex_home_from_arg(args.codex_home)
         session = resolve_session(args.session, codex_home)
     except Exception as exc:
@@ -1054,22 +1263,37 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.probe:
-        probe(session, preset, boundary, display_tz)
+        probe(session, preset, time_range, display_tz, args.since, args.until)
         return 0
 
     if preset == "raw-jsonl":
-        output_text = render_raw_jsonl(session.path, boundary)
-        record_count = jsonl_record_count(session.path, boundary)
+        output_text = render_raw_jsonl(session.path, time_range)
+        record_count = jsonl_record_count(session.path, time_range)
         section_count = record_count
     elif preset == "trace":
-        trace_records = build_trace_records(session.path, boundary, display_tz)
-        output_text = render_trace_markdown(session, trace_records, display_tz, args.since)
+        trace_records = build_trace_records(session.path, time_range, display_tz)
+        output_text = render_trace_markdown(
+            session,
+            trace_records,
+            display_tz,
+            time_range,
+            args.since,
+            args.until,
+        )
         record_count = len(trace_records)
         section_count = len(trace_records)
     else:
-        records = build_records(session.path, preset, boundary, display_tz)
+        records = build_records(session.path, preset, time_range, display_tz)
         merged = merge_records(records)
-        output_text = render_markdown(session, preset, merged, display_tz, args.since)
+        output_text = render_markdown(
+            session,
+            preset,
+            merged,
+            display_tz,
+            time_range,
+            args.since,
+            args.until,
+        )
         record_count = len(records)
         section_count = len(merged)
 

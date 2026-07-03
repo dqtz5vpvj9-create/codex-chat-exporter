@@ -124,9 +124,22 @@ codex-chat-export SESSION_ID out.md \
   --since 2026-05-17T10:52:04
 ```
 
-Naive `--since` timestamps are still interpreted as UTC for compatibility.
-Include an offset to filter by another timezone, for example
-`--since 2026-05-17T18:52:04+08:00`.
+Export a date range with systemd/journalctl-style time specs:
+
+```bash
+codex-chat-export SESSION_ID trace.md --preset trace --since -1h
+codex-chat-export SESSION_ID trace.md --preset trace --since "1 hour ago" --until now
+codex-chat-export SESSION_ID trace.md --preset trace \
+  --since "2026-07-03 09:55:27" \
+  --until "2026-07-03 10:00:00"
+```
+
+Supported range specs include ISO timestamps, `YYYY-MM-DD HH:MM:SS`, `HH:MM:SS`,
+`today`, `yesterday`, `tomorrow`, `now`, `-1h`, `30min ago`, and combinations
+such as `1h30m`. Naive systemd-style timestamps are interpreted in the display
+timezone selected by `--tz` (default `+08:00`). Naive ISO timestamps with `T`
+are still interpreted as UTC for compatibility. Include an offset to be
+explicit, for example `--since 2026-05-17T18:52:04+08:00`.
 
 Use a custom Codex home:
 
