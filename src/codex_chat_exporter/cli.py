@@ -17,15 +17,21 @@ PRESET_ALIASES = {
     "full": "full",
     "readable": "readable",
     "decisions": "decisions",
+    "events": "events",
+    "eventlog": "events",
+    "raw-jsonl": "raw-jsonl",
+    "jsonl": "raw-jsonl",
     "raw": "full",
     "clean": "readable",
     "substantive": "decisions",
 }
 
 PRESET_LABELS = {
-    "full": "full (legacy raw): complete visible chat minus internal context tags",
+    "full": "full visible transcript (legacy raw): all visible user/assistant text minus internal context tags",
     "readable": "readable (legacy clean): full chat with obvious noise removed",
     "decisions": "decisions (legacy substantive): compact conclusion/evidence extract",
+    "events": "event log: all JSONL events rendered as Markdown, with bulky internal blobs omitted",
+    "raw-jsonl": "raw JSONL: exact original session JSONL, including tool calls and internal records",
 }
 
 ENV_KEYWORDS = [
@@ -126,6 +132,13 @@ class SessionInfo:
     path: Path
     session_id: str | None = None
     thread_name: str | None = None
+
+
+@dataclass(frozen=True)
+class EventRecord:
+    timestamp: str
+    kind: str
+    body: str
 
 
 def codex_home_from_arg(value: str | None) -> Path:
@@ -302,7 +315,8 @@ def sanitize_filename(value: str) -> str:
 
 def default_output_path(session: SessionInfo, preset: str) -> Path:
     stem = session.thread_name or session.session_id or session.path.stem
-    return Path(f"{sanitize_filename(stem)}-{preset}.md")
+    suffix = ".jsonl" if preset == "raw-jsonl" else ".md"
+    return Path(f"{sanitize_filename(stem)}-{preset}{suffix}")
 
 
 def extract_text(payload: dict) -> str:
@@ -345,6 +359,119 @@ def iter_visible_messages(path: Path, boundary: datetime | None = None) -> Itera
                     phase=payload.get("phase") or "",
                     body=text,
                 )
+
+
+def iter_jsonl_objects(path: Path, boundary: datetime | None = None) -> Iterator[dict]:
+    with path.open() as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if boundary:
+                ts_dt = parse_ts(obj.get("timestamp"))
+                if ts_dt is not None and ts_dt <= boundary:
+                    continue
+            yield obj
+
+
+def jsonl_record_count(path: Path, boundary: datetime | None = None) -> int:
+    return sum(1 for _ in iter_jsonl_objects(path, boundary))
+
+
+def event_kind(obj: dict) -> str:
+    top_type = obj.get("type") or "unknown"
+    payload = obj.get("payload") or {}
+    if not isinstance(payload, dict):
+        return top_type
+
+    payload_type = payload.get("type")
+    if top_type == "response_item":
+        if payload_type == "message":
+            role = payload.get("role") or "unknown"
+            phase = payload.get("phase")
+            return f"response_item/message/{role}" + (f"/{phase}" if phase else "")
+        name = payload.get("name")
+        if name:
+            return f"response_item/{payload_type}/{name}"
+        return f"response_item/{payload_type or 'unknown'}"
+    if top_type == "event_msg" and payload_type:
+        return f"event_msg/{payload_type}"
+    return f"{top_type}/{payload_type}" if payload_type else top_type
+
+
+def event_json_ready(value):
+    """Keep event exports readable without dumping opaque encrypted blobs."""
+    if isinstance(value, dict):
+        ready = {}
+        for key, item in value.items():
+            if key in {"encrypted_content", "developer_instructions"} and isinstance(item, str):
+                ready[key] = f"<omitted {len(item)} chars>"
+            else:
+                ready[key] = event_json_ready(item)
+        return ready
+    if isinstance(value, list):
+        return [event_json_ready(item) for item in value]
+    return value
+
+
+def build_event_records(path: Path, boundary: datetime | None = None) -> list[EventRecord]:
+    records = []
+    for obj in iter_jsonl_objects(path, boundary):
+        records.append(
+            EventRecord(
+                timestamp=fmt_ts(obj.get("timestamp")),
+                kind=event_kind(obj),
+                body=json.dumps(event_json_ready(obj), ensure_ascii=False, indent=2),
+            )
+        )
+    return records
+
+
+def render_event_markdown(
+    session: SessionInfo,
+    records: Iterable[EventRecord],
+    since: str | None = None,
+) -> str:
+    lines = [
+        "# Codex Session Event Log",
+        f"Preset: {PRESET_LABELS['events']}",
+        f"Source: {session.path}",
+    ]
+    if session.session_id:
+        lines.append(f"Session: {session.session_id}")
+    if session.thread_name:
+        lines.append(f"Thread: {session.thread_name}")
+    if since:
+        lines.append(f"Window: after {since} UTC")
+    lines.append("")
+
+    for index, item in enumerate(records, start=1):
+        ts_s = f" [{item.timestamp}]" if item.timestamp else ""
+        lines.append(f"\n## Event {index}{ts_s} `{item.kind}`")
+        lines.append("```json")
+        lines.append(item.body)
+        lines.append("```")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_raw_jsonl(path: Path, boundary: datetime | None = None) -> str:
+    if boundary is None:
+        return path.read_text()
+
+    lines = []
+    with path.open() as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            ts_dt = parse_ts(obj.get("timestamp"))
+            if ts_dt is not None and ts_dt <= boundary:
+                continue
+            lines.append(line if line.endswith("\n") else f"{line}\n")
+    return "".join(lines)
 
 
 def keep_user_body(text: str, preset: str) -> str:
@@ -464,16 +591,29 @@ def render_markdown(
     return "\n".join(lines)
 
 
-def probe(session: SessionInfo, boundary: datetime | None = None) -> None:
-    records = list(iter_visible_messages(session.path, boundary))
-    first = records[0].timestamp if records else None
-    last = records[-1].timestamp if records else None
+def probe(session: SessionInfo, preset: str, boundary: datetime | None = None) -> None:
+    if preset in {"events", "raw-jsonl"}:
+        objects = list(iter_jsonl_objects(session.path, boundary))
+        records = [
+            fmt_ts(obj.get("timestamp"))
+            for obj in objects
+            if obj.get("timestamp")
+        ]
+        first = records[0] if records else None
+        last = records[-1] if records else None
+        count = len(objects)
+    else:
+        visible_records = list(iter_visible_messages(session.path, boundary))
+        first = visible_records[0].timestamp if visible_records else None
+        last = visible_records[-1].timestamp if visible_records else None
+        count = len(visible_records)
     print(f"path:    {session.path}")
     if session.session_id:
         print(f"session: {session.session_id}")
     if session.thread_name:
         print(f"thread:  {session.thread_name}")
-    print(f"records: {len(records)}")
+    print(f"preset:  {preset}")
+    print(f"records: {count}")
     print(f"first:   {first}")
     print(f"last:    {last}")
 
@@ -496,16 +636,22 @@ decisions, which is the old substantive mode under a clearer name.
     )
     parser.add_argument(
         "--preset",
-        choices=["full", "readable", "decisions", "raw", "clean", "substantive"],
+        choices=[
+            "full", "readable", "decisions", "events", "raw-jsonl",
+            "raw", "clean", "substantive", "eventlog", "jsonl",
+        ],
         default=None,
         help=(
-            "Export preset. Prefer full/readable/decisions. "
+            "Export preset. Prefer full/readable/decisions/events/raw-jsonl. "
             "raw/clean/substantive are legacy aliases."
         ),
     )
     parser.add_argument(
         "--mode",
-        choices=["raw", "clean", "substantive", "full", "readable", "decisions"],
+        choices=[
+            "raw", "clean", "substantive", "full", "readable", "decisions",
+            "events", "raw-jsonl", "eventlog", "jsonl",
+        ],
         default=None,
         help="Deprecated alias for --preset; kept for old commands.",
     )
@@ -533,8 +679,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.list_presets:
-        for name in ("full", "readable", "decisions"):
+        for name in ("full", "readable", "decisions", "events", "raw-jsonl"):
             print(f"{name}: {PRESET_LABELS[name]}")
+        print("aliases: eventlog=events, jsonl=raw-jsonl")
         print("legacy aliases: raw=full, clean=readable, substantive=decisions")
         return 0
 
@@ -551,21 +698,33 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.probe:
-        probe(session, boundary)
+        probe(session, preset, boundary)
         return 0
 
-    records = build_records(session.path, preset, boundary)
-    merged = merge_records(records)
-    markdown = render_markdown(session, preset, merged, args.since)
+    if preset == "raw-jsonl":
+        output_text = render_raw_jsonl(session.path, boundary)
+        record_count = jsonl_record_count(session.path, boundary)
+        section_count = record_count
+    elif preset == "events":
+        event_records = build_event_records(session.path, boundary)
+        output_text = render_event_markdown(session, event_records, args.since)
+        record_count = len(event_records)
+        section_count = len(event_records)
+    else:
+        records = build_records(session.path, preset, boundary)
+        merged = merge_records(records)
+        output_text = render_markdown(session, preset, merged, args.since)
+        record_count = len(records)
+        section_count = len(merged)
 
     if args.stdout:
-        sys.stdout.write(markdown)
+        sys.stdout.write(output_text)
     else:
         output = Path(args.output).expanduser() if args.output else default_output_path(session, preset)
-        output.write_text(markdown)
+        output.write_text(output_text)
         print(f"wrote {output}")
     print(f"preset: {preset}", file=sys.stderr if args.stdout else sys.stdout)
-    print(f"records: {len(records)}; merged sections: {len(merged)}", file=sys.stderr if args.stdout else sys.stdout)
+    print(f"records: {record_count}; merged sections: {section_count}", file=sys.stderr if args.stdout else sys.stdout)
     return 0
 
 

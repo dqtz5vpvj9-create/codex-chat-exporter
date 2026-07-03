@@ -23,7 +23,7 @@ This tool focuses on the part people usually want to read or share:
 ## Highlights
 
 - **Fast on large logs**: exports a 112MB / 54,314-row session in about 1.2-1.4s.
-- **Three useful presets**: `full`, `readable`, and `decisions`.
+- **Five useful presets**: `full`, `readable`, `decisions`, `events`, and `raw-jsonl`.
 - **No runtime dependencies**: Python standard library only.
 - **Session id lookup**: pass a Codex session id and it finds the matching JSONL under `~/.codex/sessions`.
 - **Direct file mode**: pass any `rollout-*.jsonl` path.
@@ -58,15 +58,17 @@ codex-chat-export SESSION_ID out.md --preset full
 
 | Preset | Best for | What it keeps |
 | --- | --- | --- |
-| `full` | high-fidelity chat archive | complete visible user/assistant chat, with internal Codex context tags removed |
+| `full` | high-fidelity chat archive | complete visible user/assistant transcript, with internal Codex context tags removed; excludes tool calls, tool outputs, reasoning records, and event messages |
 | `readable` | day-to-day reading | full chat with obvious noise and short tactical messages removed |
 | `decisions` | quick review, handoff, summaries | compact conclusion/evidence-focused extract |
+| `events` | debugging exporter behavior or agent execution | all JSONL events rendered as Markdown, including tool calls and tool outputs; bulky encrypted/internal blobs are omitted |
+| `raw-jsonl` | exact archival or downstream parsing | exact original session JSONL, including tool calls, tool outputs, reasoning records, event messages, and internal records |
 
 Legacy names still work:
 
 | Legacy | Current |
 | --- | --- |
-| `raw` | `full` |
+| `raw` | `full` for backward compatibility; use `raw-jsonl` for exact raw JSONL |
 | `clean` | `readable` |
 | `substantive` | `decisions` |
 
@@ -94,6 +96,8 @@ codex-chat-export SESSION_ID --probe
 codex-chat-export SESSION_ID out.md --preset full
 codex-chat-export ~/.codex/sessions/2026/05/17/rollout-xxx.jsonl out.md --preset readable
 codex-chat-export ~/.codex/sessions/2026/05/17/rollout-xxx.jsonl out.md --preset decisions
+codex-chat-export SESSION_ID events.md --preset events
+codex-chat-export SESSION_ID raw.jsonl --preset raw-jsonl
 ```
 
 Print to stdout:
