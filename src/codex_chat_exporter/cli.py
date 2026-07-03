@@ -17,8 +17,7 @@ PRESET_ALIASES = {
     "full": "full",
     "readable": "readable",
     "decisions": "decisions",
-    "events": "events",
-    "eventlog": "events",
+    "trace": "trace",
     "raw-jsonl": "raw-jsonl",
     "jsonl": "raw-jsonl",
     "raw": "full",
@@ -30,7 +29,7 @@ PRESET_LABELS = {
     "full": "full visible transcript (legacy raw): all visible user/assistant text minus internal context tags",
     "readable": "readable (legacy clean): full chat with obvious noise removed",
     "decisions": "decisions (legacy substantive): compact conclusion/evidence extract",
-    "events": "event log: all JSONL events rendered as Markdown, with bulky internal blobs omitted",
+    "trace": "execution trace: all JSONL records rendered as Markdown, with bulky internal blobs omitted",
     "raw-jsonl": "raw JSONL: exact original session JSONL, including tool calls and internal records",
 }
 
@@ -135,7 +134,7 @@ class SessionInfo:
 
 
 @dataclass(frozen=True)
-class EventRecord:
+class TraceRecord:
     timestamp: str
     kind: str
     body: str
@@ -415,11 +414,11 @@ def event_json_ready(value):
     return value
 
 
-def build_event_records(path: Path, boundary: datetime | None = None) -> list[EventRecord]:
+def build_trace_records(path: Path, boundary: datetime | None = None) -> list[TraceRecord]:
     records = []
     for obj in iter_jsonl_objects(path, boundary):
         records.append(
-            EventRecord(
+            TraceRecord(
                 timestamp=fmt_ts(obj.get("timestamp")),
                 kind=event_kind(obj),
                 body=json.dumps(event_json_ready(obj), ensure_ascii=False, indent=2),
@@ -428,14 +427,14 @@ def build_event_records(path: Path, boundary: datetime | None = None) -> list[Ev
     return records
 
 
-def render_event_markdown(
+def render_trace_markdown(
     session: SessionInfo,
-    records: Iterable[EventRecord],
+    records: Iterable[TraceRecord],
     since: str | None = None,
 ) -> str:
     lines = [
-        "# Codex Session Event Log",
-        f"Preset: {PRESET_LABELS['events']}",
+        "# Codex Session Trace",
+        f"Preset: {PRESET_LABELS['trace']}",
         f"Source: {session.path}",
     ]
     if session.session_id:
@@ -448,7 +447,7 @@ def render_event_markdown(
 
     for index, item in enumerate(records, start=1):
         ts_s = f" [{item.timestamp}]" if item.timestamp else ""
-        lines.append(f"\n## Event {index}{ts_s} `{item.kind}`")
+        lines.append(f"\n## Trace Record {index}{ts_s} `{item.kind}`")
         lines.append("```json")
         lines.append(item.body)
         lines.append("```")
@@ -592,7 +591,7 @@ def render_markdown(
 
 
 def probe(session: SessionInfo, preset: str, boundary: datetime | None = None) -> None:
-    if preset in {"events", "raw-jsonl"}:
+    if preset in {"trace", "raw-jsonl"}:
         objects = list(iter_jsonl_objects(session.path, boundary))
         records = [
             fmt_ts(obj.get("timestamp"))
@@ -637,12 +636,12 @@ decisions, which is the old substantive mode under a clearer name.
     parser.add_argument(
         "--preset",
         choices=[
-            "full", "readable", "decisions", "events", "raw-jsonl",
-            "raw", "clean", "substantive", "eventlog", "jsonl",
+            "full", "readable", "decisions", "trace", "raw-jsonl",
+            "raw", "clean", "substantive", "jsonl",
         ],
         default=None,
         help=(
-            "Export preset. Prefer full/readable/decisions/events/raw-jsonl. "
+            "Export preset. Prefer full/readable/decisions/trace/raw-jsonl. "
             "raw/clean/substantive are legacy aliases."
         ),
     )
@@ -650,7 +649,7 @@ decisions, which is the old substantive mode under a clearer name.
         "--mode",
         choices=[
             "raw", "clean", "substantive", "full", "readable", "decisions",
-            "events", "raw-jsonl", "eventlog", "jsonl",
+            "trace", "raw-jsonl", "jsonl",
         ],
         default=None,
         help="Deprecated alias for --preset; kept for old commands.",
@@ -679,9 +678,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.list_presets:
-        for name in ("full", "readable", "decisions", "events", "raw-jsonl"):
+        for name in ("full", "readable", "decisions", "trace", "raw-jsonl"):
             print(f"{name}: {PRESET_LABELS[name]}")
-        print("aliases: eventlog=events, jsonl=raw-jsonl")
+        print("aliases: jsonl=raw-jsonl")
         print("legacy aliases: raw=full, clean=readable, substantive=decisions")
         return 0
 
@@ -705,11 +704,11 @@ def main(argv: list[str] | None = None) -> int:
         output_text = render_raw_jsonl(session.path, boundary)
         record_count = jsonl_record_count(session.path, boundary)
         section_count = record_count
-    elif preset == "events":
-        event_records = build_event_records(session.path, boundary)
-        output_text = render_event_markdown(session, event_records, args.since)
-        record_count = len(event_records)
-        section_count = len(event_records)
+    elif preset == "trace":
+        trace_records = build_trace_records(session.path, boundary)
+        output_text = render_trace_markdown(session, trace_records, args.since)
+        record_count = len(trace_records)
+        section_count = len(trace_records)
     else:
         records = build_records(session.path, preset, boundary)
         merged = merge_records(records)
