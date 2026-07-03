@@ -29,9 +29,11 @@ PRESET_LABELS = {
     "full": "full visible transcript (legacy raw): all visible user/assistant text minus internal context tags",
     "readable": "readable (legacy clean): full chat with obvious noise removed",
     "decisions": "decisions (legacy substantive): compact conclusion/evidence extract",
-    "trace": "execution trace: all JSONL records rendered as Markdown, with bulky internal blobs omitted",
+    "trace": "execution trace: readable Markdown for messages, tool calls, and tool outputs",
     "raw-jsonl": "raw JSONL: exact original session JSONL, including tool calls and internal records",
 }
+
+TRACE_TEXT_LIMIT = 20000
 
 ENV_KEYWORDS = [
     "cvd", "cuttlefish", "cgdroid", "arm-2", "r743", "adb reboot", "adb sync",
@@ -136,7 +138,7 @@ class SessionInfo:
 @dataclass(frozen=True)
 class TraceRecord:
     timestamp: str
-    kind: str
+    title: str
     body: str
 
 
@@ -399,31 +401,268 @@ def event_kind(obj: dict) -> str:
     return f"{top_type}/{payload_type}" if payload_type else top_type
 
 
-def event_json_ready(value):
-    """Keep event exports readable without dumping opaque encrypted blobs."""
-    if isinstance(value, dict):
-        ready = {}
-        for key, item in value.items():
-            if key in {"encrypted_content", "developer_instructions"} and isinstance(item, str):
-                ready[key] = f"<omitted {len(item)} chars>"
-            else:
-                ready[key] = event_json_ready(item)
-        return ready
-    if isinstance(value, list):
-        return [event_json_ready(item) for item in value]
-    return value
+def trace_text(text, limit: int = TRACE_TEXT_LIMIT) -> str:
+    if not isinstance(text, str):
+        text = json.dumps(text, ensure_ascii=False, indent=2)
+    text = text.rstrip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n... [trace output truncated at {limit} chars; use raw-jsonl for exact record]"
+
+
+def fence(label: str, text, language: str = "text", limit: int = TRACE_TEXT_LIMIT) -> str:
+    rendered = trace_text(text, limit)
+    if not rendered.strip():
+        return ""
+    return f"{label}\n\n```{language}\n{rendered}\n```"
+
+
+def json_fence(label: str, value, limit: int = TRACE_TEXT_LIMIT) -> str:
+    return fence(label, json.dumps(value, ensure_ascii=False, indent=2), "json", limit)
+
+
+def kv_lines(items: Iterable[tuple[str, object]]) -> list[str]:
+    lines = []
+    for key, value in items:
+        if value is None or value == "":
+            continue
+        lines.append(f"- {key}: `{value}`")
+    return lines
+
+
+def decode_arguments(value: str | None):
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
+def render_tool_arguments(name: str, args) -> str:
+    if args is None:
+        return ""
+    if name == "exec_command" and isinstance(args, dict):
+        lines = kv_lines(
+            [
+                ("workdir", args.get("workdir")),
+                ("yield_time_ms", args.get("yield_time_ms")),
+                ("max_output_tokens", args.get("max_output_tokens")),
+            ]
+        )
+        cmd = args.get("cmd")
+        if cmd:
+            lines.append("")
+            lines.append(fence("Command:", str(cmd), "bash", TRACE_TEXT_LIMIT))
+        rest = {
+            key: value
+            for key, value in args.items()
+            if key not in {"cmd", "workdir", "yield_time_ms", "max_output_tokens"}
+        }
+        if rest:
+            lines.append("")
+            lines.append(json_fence("Other arguments:", rest))
+        return "\n".join(lines).strip()
+
+    if isinstance(args, dict):
+        return json_fence("Arguments:", args)
+    return fence("Arguments:", str(args), "text")
+
+
+def render_message_payload(payload: dict) -> str:
+    role = payload.get("role") or "message"
+    if role == "developer":
+        return "_Developer/internal instructions omitted; use `raw-jsonl` for exact content._"
+    text = extract_text(payload)
+    if text:
+        return trace_text(text)
+    return "_Internal context omitted._"
+
+
+def render_trace_record(obj: dict, call_names: dict[str, str]) -> TraceRecord | None:
+    payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+    top_type = obj.get("type") or "unknown"
+    payload_type = payload.get("type")
+    ts = fmt_ts(obj.get("timestamp"))
+
+    if top_type == "response_item" and payload_type == "message":
+        role = payload.get("role") or "message"
+        phase = payload.get("phase")
+        title = f"Message: {role}" + (f" [{phase}]" if phase else "")
+        return TraceRecord(ts, title, render_message_payload(payload))
+
+    if top_type == "response_item" and payload_type == "function_call":
+        name = payload.get("name") or "tool"
+        call_id = payload.get("call_id")
+        if call_id:
+            call_names[call_id] = name
+        lines = kv_lines([("call_id", call_id)])
+        args_body = render_tool_arguments(name, decode_arguments(payload.get("arguments")))
+        if args_body:
+            if lines:
+                lines.append("")
+            lines.append(args_body)
+        return TraceRecord(ts, f"Tool Call: {name}", "\n".join(lines).strip())
+
+    if top_type == "response_item" and payload_type == "function_call_output":
+        call_id = payload.get("call_id")
+        name = call_names.get(call_id, "tool")
+        lines = kv_lines([("call_id", call_id)])
+        output = payload.get("output") or ""
+        if output:
+            if lines:
+                lines.append("")
+            lines.append(fence("Output:", output, "text", TRACE_TEXT_LIMIT))
+        return TraceRecord(ts, f"Tool Output: {name}", "\n".join(lines).strip())
+
+    if top_type == "response_item" and payload_type == "custom_tool_call":
+        name = payload.get("name") or "custom_tool"
+        call_id = payload.get("call_id")
+        if call_id:
+            call_names[call_id] = name
+        lines = kv_lines([("call_id", call_id), ("status", payload.get("status"))])
+        tool_input = payload.get("input") or ""
+        if tool_input:
+            if lines:
+                lines.append("")
+            language = "diff" if name == "apply_patch" else "text"
+            lines.append(fence("Input:", tool_input, language, TRACE_TEXT_LIMIT))
+        return TraceRecord(ts, f"Custom Tool Call: {name}", "\n".join(lines).strip())
+
+    if top_type == "response_item" and payload_type == "custom_tool_call_output":
+        call_id = payload.get("call_id")
+        name = call_names.get(call_id, "custom_tool")
+        lines = kv_lines([("call_id", call_id)])
+        output = payload.get("output") or ""
+        if output:
+            if lines:
+                lines.append("")
+            lines.append(fence("Output:", output, "text", TRACE_TEXT_LIMIT))
+        return TraceRecord(ts, f"Custom Tool Output: {name}", "\n".join(lines).strip())
+
+    if top_type == "response_item" and payload_type == "reasoning":
+        summary = payload.get("summary") or []
+        if summary:
+            return TraceRecord(ts, "Reasoning Summary", json_fence("Summary:", summary))
+        return None
+
+    if top_type == "response_item" and payload_type == "web_search_call":
+        return TraceRecord(
+            ts,
+            "Web Search",
+            "\n".join(kv_lines([("status", payload.get("status")), ("action", payload.get("action"))])),
+        )
+
+    if top_type == "event_msg":
+        if payload_type in {"agent_message", "user_message"}:
+            return None
+        if payload_type == "task_started":
+            return TraceRecord(
+                ts,
+                "Task Started",
+                "\n".join(
+                    kv_lines(
+                        [
+                            ("turn_id", payload.get("turn_id")),
+                            ("model_context_window", payload.get("model_context_window")),
+                            ("collaboration_mode", payload.get("collaboration_mode_kind")),
+                        ]
+                    )
+                ),
+            )
+        if payload_type == "task_complete":
+            return TraceRecord(
+                ts,
+                "Task Complete",
+                "\n".join(
+                    kv_lines(
+                        [
+                            ("turn_id", payload.get("turn_id")),
+                            ("duration_ms", payload.get("duration_ms")),
+                            ("time_to_first_token_ms", payload.get("time_to_first_token_ms")),
+                        ]
+                    )
+                ),
+            )
+        if payload_type == "token_count":
+            return None
+        if payload_type == "patch_apply_end":
+            lines = kv_lines(
+                [
+                    ("call_id", payload.get("call_id")),
+                    ("success", payload.get("success")),
+                    ("status", payload.get("status")),
+                ]
+            )
+            for key in ("stdout", "stderr"):
+                value = payload.get(key)
+                if value:
+                    if lines:
+                        lines.append("")
+                    lines.append(fence(f"{key}:", value, "text", 4000))
+            changes = payload.get("changes")
+            if changes:
+                if lines:
+                    lines.append("")
+                lines.append(json_fence("Changes:", changes, 4000))
+            return TraceRecord(ts, "Patch Apply Result", "\n".join(lines).strip())
+        if payload_type in {"turn_aborted", "context_compacted", "thread_rolled_back", "thread_goal_updated", "web_search_end"}:
+            details = {key: value for key, value in payload.items() if key != "type"}
+            return TraceRecord(ts, f"Event: {payload_type}", json_fence("Details:", details, 4000))
+        return TraceRecord(ts, f"Event: {payload_type or 'unknown'}", json_fence("Payload:", payload, 4000))
+
+    if top_type == "session_meta":
+        payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+        return TraceRecord(
+            ts,
+            "Session Metadata",
+            "\n".join(
+                kv_lines(
+                    [
+                        ("id", payload.get("id")),
+                        ("session_id", payload.get("session_id")),
+                        ("cwd", payload.get("cwd")),
+                        ("cli_version", payload.get("cli_version")),
+                        ("source", payload.get("source")),
+                    ]
+                )
+            ),
+        )
+
+    if top_type == "turn_context":
+        payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+        return TraceRecord(
+            ts,
+            "Turn Context",
+            "\n".join(
+                kv_lines(
+                    [
+                        ("turn_id", payload.get("turn_id")),
+                        ("cwd", payload.get("cwd")),
+                        ("model", payload.get("model")),
+                        ("current_date", payload.get("current_date")),
+                        ("timezone", payload.get("timezone")),
+                        ("approval_policy", payload.get("approval_policy")),
+                    ]
+                )
+            ),
+        )
+
+    if top_type == "compacted":
+        payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+        message = payload.get("message") or "_Context compacted._"
+        return TraceRecord(ts, "Context Compacted", trace_text(message, 4000))
+
+    return TraceRecord(ts, event_kind(obj), json_fence("Record:", obj, 4000))
 
 
 def build_trace_records(path: Path, boundary: datetime | None = None) -> list[TraceRecord]:
     records = []
+    call_names: dict[str, str] = {}
     for obj in iter_jsonl_objects(path, boundary):
-        records.append(
-            TraceRecord(
-                timestamp=fmt_ts(obj.get("timestamp")),
-                kind=event_kind(obj),
-                body=json.dumps(event_json_ready(obj), ensure_ascii=False, indent=2),
-            )
-        )
+        record = render_trace_record(obj, call_names)
+        if record is not None:
+            records.append(record)
     return records
 
 
@@ -447,10 +686,9 @@ def render_trace_markdown(
 
     for index, item in enumerate(records, start=1):
         ts_s = f" [{item.timestamp}]" if item.timestamp else ""
-        lines.append(f"\n## Trace Record {index}{ts_s} `{item.kind}`")
-        lines.append("```json")
-        lines.append(item.body)
-        lines.append("```")
+        lines.append(f"\n## Trace Record {index}{ts_s} - {item.title}")
+        if item.body:
+            lines.append(item.body)
     lines.append("")
     return "\n".join(lines)
 
@@ -591,7 +829,13 @@ def render_markdown(
 
 
 def probe(session: SessionInfo, preset: str, boundary: datetime | None = None) -> None:
-    if preset in {"trace", "raw-jsonl"}:
+    if preset == "trace":
+        trace_records = build_trace_records(session.path, boundary)
+        records = [record.timestamp for record in trace_records if record.timestamp]
+        first = records[0] if records else None
+        last = records[-1] if records else None
+        count = len(trace_records)
+    elif preset == "raw-jsonl":
         objects = list(iter_jsonl_objects(session.path, boundary))
         records = [
             fmt_ts(obj.get("timestamp"))

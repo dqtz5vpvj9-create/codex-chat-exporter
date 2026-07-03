@@ -61,7 +61,7 @@ codex-chat-export SESSION_ID out.md --preset full
 | `full` | high-fidelity chat archive | complete visible user/assistant transcript, with internal Codex context tags removed; excludes tool calls, tool outputs, reasoning records, and event messages |
 | `readable` | day-to-day reading | full chat with obvious noise and short tactical messages removed |
 | `decisions` | quick review, handoff, summaries | compact conclusion/evidence-focused extract |
-| `trace` | debugging exporter behavior or agent execution | all JSONL records rendered as Markdown, including tool calls and tool outputs; bulky encrypted/internal blobs are omitted |
+| `trace` | debugging exporter behavior or agent execution | readable Markdown trace: messages, tool calls, and tool outputs are rendered directly; bulky encrypted/internal blobs are omitted |
 | `raw-jsonl` | exact archival or downstream parsing | exact original session JSONL, including tool calls, tool outputs, reasoning records, event messages, and internal records |
 
 Legacy names still work:
